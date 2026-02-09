@@ -3,3 +3,4 @@ tensorflow
 tensorflow_federated
 numpy
 matplotlib
+hdbscan
