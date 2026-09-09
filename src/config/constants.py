@@ -64,7 +64,7 @@ MAGNITUDE_WEIGHT = 0.25
 VALIDATION_WEIGHT = 0.25
 
 # Require at least three of the four equally weighted defense checks.
-TRUST_THRESHOLD = 0.51
+TRUST_THRESHOLD = 0.50
 
 ## Data Dir path
 DATA_DIR = '/home/mahesh/Desktop/Dissertation/tf_fd_cancer_fakeclients_detection/data/Kidney Cancer'
@@ -77,6 +77,22 @@ TRUST_WEIGHT_CLUSTER = 0.25
 TRUST_WEIGHT_DIRECTION = 0.25
 TRUST_WEIGHT_MAGNITUDE = 0.25
 TRUST_WEIGHT_VALIDATION = 0.25
+
+# Keep the clustering space low-dimensional because each round contains only
+# NUM_CLIENTS samples. This also makes the plotted PCA plane the space used by
+# HDBSCAN rather than showing only a projection of a much larger space.
+HDBSCAN_PCA_COMPONENTS = 2
+HDBSCAN_MIN_CLUSTER_SIZE = 2
+
+# Merge very close density subclusters in the normalized-update PCA space.
+# This prevents a small benign population from being split into many pairs.
+HDBSCAN_CLUSTER_SELECTION_EPSILON = 0.2
+HDBSCAN_ALLOW_SINGLE_CLUSTER = True
+
+# Maximum Euclidean distance from client_0 for an HDBSCAN noise point.
+# Client updates are L2-normalized before PCA. PCA cannot increase pairwise
+# Euclidean distance, so distances in the clustering space remain in [0, 2].
+HDBSCAN_NOISE_DISTANCE_THRESHOLD = 1.5
 
 # Clients with an angle strictly below this value are accepted.
 DIRECTION_THRESHOLD = 90

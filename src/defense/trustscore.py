@@ -8,64 +8,63 @@ from src.config import constants
 # ============================================================
 
 
-def calculate_clustering_scores(hdbscan_results, head_client="client_0"):
+def calculate_clustering_scores(
+    hdbscan_results,
+    head_client="client_0",
+    noise_distance_threshold=constants.HDBSCAN_NOISE_DISTANCE_THRESHOLD,
+):
     """
     Binary clustering score.
 
-    C_i = 1
-        if client belongs to the same HDBSCAN cluster
-        as the head client.
-
-    C_i = 0
-        otherwise.
-
-    If the head client is classified as noise (-1),
-    only the head client receives score 1.
+    Valid-cluster clients receive 1 only when they share client_0's cluster.
+    A noise client (-1) is compared with client_0 in the same normalized-update
+    PCA feature space used by HDBSCAN and receives 1 when its Euclidean
+    distance is within ``noise_distance_threshold``. If client_0 is noise,
+    the distance rule is used for every client in that round. Client_0 always
+    receives 1.
     """
+
+    if not 0 <= noise_distance_threshold <= 2:
+        raise ValueError(
+            "HDBSCAN noise distance threshold must be between 0 and 2."
+        )
 
     clustering_scores = {}
 
     for round_key, result in hdbscan_results.items():
-
         clustering_scores[round_key] = {}
 
-        labels = result["labels"]
+        labels = np.asarray(result["labels"])
         client_keys = result["client_keys"]
+        features = np.asarray(result["features"])
 
         if head_client not in client_keys:
             raise ValueError(f"{head_client} missing in {round_key}")
 
+        if len(labels) != len(client_keys) or len(features) != len(client_keys):
+            raise ValueError(
+                "HDBSCAN labels, features, and client keys must align "
+                f"in {round_key}"
+            )
+
         head_index = client_keys.index(head_client)
-
         head_cluster = labels[head_index]
+        head_features = features[head_index]
 
-        # ----------------------------------------------------
-        # Head client classified as noise
-        # ----------------------------------------------------
-
-        if head_cluster == -1:
-
-            for client_id in client_keys:
-
-                clustering_scores[round_key][client_id] = (
-                    1 if client_id == head_client else 0
+        for client_index, (client_id, label) in enumerate(
+            zip(client_keys, labels)
+        ):
+            if client_id == head_client:
+                score = 1
+            elif head_cluster == -1 or label == -1:
+                distance_to_head = np.linalg.norm(
+                    features[client_index] - head_features
                 )
-
-            continue
-
-        # ----------------------------------------------------
-        # Normal cluster comparison
-        # ----------------------------------------------------
-
-        for client_id, label in zip(client_keys, labels):
-
-            if label == head_cluster:
-
-                clustering_scores[round_key][client_id] = 1
-
+                score = int(distance_to_head <= noise_distance_threshold)
             else:
+                score = int(label == head_cluster)
 
-                clustering_scores[round_key][client_id] = 0
+            clustering_scores[round_key][client_id] = score
 
     return clustering_scores
 
@@ -255,6 +254,8 @@ def calculate_trust_scores(
 
     validation_tolerance = constants.VALIDATION_ACCURACY_TOLERANCE
 
+    noise_distance_threshold = constants.HDBSCAN_NOISE_DISTANCE_THRESHOLD
+
     # ========================================================
     # CHECK WEIGHTS
     # ========================================================
@@ -272,7 +273,9 @@ def calculate_trust_scores(
     # ========================================================
 
     clustering_scores = calculate_clustering_scores(
-        hdbscan_results, head_client=head_client
+        hdbscan_results,
+        head_client=head_client,
+        noise_distance_threshold=noise_distance_threshold,
     )
 
     direction_scores = calculate_direction_scores(

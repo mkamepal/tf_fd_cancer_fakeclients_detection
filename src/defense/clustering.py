@@ -15,7 +15,12 @@ from sklearn.preprocessing import normalize
 
 
 def hdbscan_one_round(
-    client_delta_dict, pca_var=0.95, min_cluster_size=2, min_samples=1
+    client_delta_dict,
+    pca_components=constants.HDBSCAN_PCA_COMPONENTS,
+    min_cluster_size=constants.HDBSCAN_MIN_CLUSTER_SIZE,
+    min_samples=1,
+    cluster_selection_epsilon=constants.HDBSCAN_CLUSTER_SELECTION_EPSILON,
+    allow_single_cluster=constants.HDBSCAN_ALLOW_SINGLE_CLUSTER,
 ):
     """
     Run HDBSCAN clustering for one federated round.
@@ -32,14 +37,20 @@ def hdbscan_one_round(
             ...
         }
 
-    pca_var : float
-        Percentage of variance preserved by PCA.
+    pca_components : int
+        Number of PCA components used for HDBSCAN.
 
     min_cluster_size : int
         Minimum number of samples required to form a cluster.
 
     min_samples : int
         HDBSCAN min_samples parameter.
+
+    cluster_selection_epsilon : float
+        Maximum distance at which nearby density subclusters are merged.
+
+    allow_single_cluster : bool
+        Allow a single benign cluster when no meaningful split exists.
 
     Returns
     -------
@@ -82,34 +93,29 @@ def hdbscan_one_round(
     ).astype(np.float32)
 
     # --------------------------------------------------------
-    # Center across clients
+    # Normalize each original client update
     # --------------------------------------------------------
 
-    X = X - X.mean(axis=0, keepdims=True)
-
-    # --------------------------------------------------------
-    # Standardize
-    # --------------------------------------------------------
-
-    X_std = X.std(axis=0, keepdims=True)
-
-    X_std[X_std == 0] = 1.0
-
-    X_norm = X / X_std
+    # Normalize before PCA so distance represents update direction without
+    # erasing the common update shared by benign clients. Centering across
+    # clients first would leave only deviations from the round mean and make
+    # a homogeneous benign population look artificially separated.
+    X_norm = normalize(X, norm="l2")
 
     # --------------------------------------------------------
     # PCA
     # --------------------------------------------------------
 
-    pca = PCA(n_components=pca_var, random_state=42)
+    maximum_components = min(len(client_keys) - 1, X.shape[1])
+    if not 1 <= pca_components <= maximum_components:
+        raise ValueError(
+            "PCA components must be between 1 and "
+            f"{maximum_components}; received {pca_components}."
+        )
+
+    pca = PCA(n_components=pca_components, random_state=42)
 
     Z = pca.fit_transform(X_norm)
-
-    # --------------------------------------------------------
-    # Normalize PCA features
-    # --------------------------------------------------------
-
-    Z_cos = normalize(Z, norm="l2")
 
     # --------------------------------------------------------
     # HDBSCAN
@@ -120,9 +126,14 @@ def hdbscan_one_round(
         min_cluster_size=min_cluster_size,
         min_samples=min_samples,
         cluster_selection_method="eom",
+        cluster_selection_epsilon=cluster_selection_epsilon,
+        allow_single_cluster=allow_single_cluster,
     )
 
-    labels = clusterer.fit_predict(Z_cos)
+    # Use the same PCA coordinates that are returned for plotting and for the
+    # distance-to-head noise rule. Re-normalizing the centered PCA points would
+    # project them onto a circle and create artificial pair-clusters.
+    labels = clusterer.fit_predict(Z)
 
     probabilities = clusterer.probabilities_
 
@@ -293,9 +304,11 @@ def save_all_hdbscan_plots(hdbscan_results, output_dir, show_plots=False):
 
 def calculate_hdbscan_results(
     client_weight_deltas,
-    pca_var=0.95,
-    min_cluster_size=2,
+    pca_components=constants.HDBSCAN_PCA_COMPONENTS,
+    min_cluster_size=constants.HDBSCAN_MIN_CLUSTER_SIZE,
     min_samples=1,
+    cluster_selection_epsilon=constants.HDBSCAN_CLUSTER_SELECTION_EPSILON,
+    allow_single_cluster=constants.HDBSCAN_ALLOW_SINGLE_CLUSTER,
     print_results=True,
 ):
     """
@@ -315,9 +328,11 @@ def calculate_hdbscan_results(
     for round_key, clients in client_weight_deltas.items():
         (labels, probabilities, Z, client_keys) = hdbscan_one_round(
             clients,
-            pca_var=pca_var,
+            pca_components=pca_components,
             min_cluster_size=min_cluster_size,
             min_samples=min_samples,
+            cluster_selection_epsilon=cluster_selection_epsilon,
+            allow_single_cluster=allow_single_cluster,
         )
 
         results[round_key] = {
