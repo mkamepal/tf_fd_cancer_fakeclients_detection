@@ -1,8 +1,26 @@
-# Data and Project Process
+# Federated Kidney Cancer Classification and Malicious-Client Detection
 
 This document explains how data moves through the federated-learning experiment,
 how malicious clients are created, how clients are scored, and which output files
 are produced. It describes the current implementation in `src/`.
+
+## Current project stage
+
+The project is at the experiment and evaluation stage. The modular runner
+implements data partitioning, two poisoning attacks, local federated training,
+four-component trust filtering, global-model evaluation, and per-round exports.
+Exploratory notebooks and publication figures are retained in `src/notebooks/`.
+
+The current configuration runs **15 clients, 9 malicious clients, and 30 rounds**
+with trust filtering enabled. Local `src/results/` contains global metrics and
+defense workbooks named for 0, 3, 5, 7, and 9 malicious clients, plus clustering
+plots. These are local experiment artifacts; their filenames alone do not
+establish run completion, performance, or which code revision produced them.
+
+The next evaluation work is to compare filtered and unfiltered runs under
+matched settings, integrate client-detection metrics, measure backdoor attack
+success, and separate trusted validation from final testing. Dependency versions
+and full run configurations also need to be recorded for reproducibility.
 
 ## Project objective
 
@@ -141,7 +159,7 @@ At the start of every round, the server broadcasts the current global weights
 `W_t` to every client. Each client:
 
 1. starts from the same `W_t`;
-2. trains locally over its training dataset with SGDM;
+2. makes one pass over its training dataset with the TFF SGDM optimizer;
 3. returns its trained weights;
 4. returns loss sum, correct-prediction count, and example count.
 
@@ -150,7 +168,8 @@ are allowed into aggregation.
 
 ### 4.1 Exact processing order in each round
 
-For round `t`, the runner performs the following sequence:
+With trust filtering enabled, for round `t` the runner performs the following
+sequence:
 
 1. Save the current server model as `W_t`.
 2. Send `W_t` and the corresponding local dataset to every client.
@@ -239,12 +258,6 @@ This removed the common update shared by benign clients and placed the remaining
 deviations around a unit circle. With `min_cluster_size=2`, HDBSCAN frequently
 treated pairs of benign clients as separate valid clusters.
 
-In the last completed clean run before the latest preprocessing correction,
-noise had already fallen to an average of `0.8` clients per round, but HDBSCAN
-still produced an average of `5` valid clusters and only `3.9` clients per round
-shared `client_0`'s clustering score. This showed that cluster fragmentation—not
-only noise—was the remaining problem.
-
 The current implementation addresses that problem by:
 
 - preserving the common update before dimensionality reduction;
@@ -254,9 +267,10 @@ The current implementation addresses that problem by:
 - merging nearby density subclusters with `cluster_selection_epsilon=0.2`; and
 - allowing a single valid cluster in a homogeneous clean round.
 
-These settings must be assessed using a new complete clean run followed by runs
-with different malicious-client counts. Results produced before this change do
-not measure the current clustering pipeline.
+Assess these settings across clean and attacked runs. Local artifacts exist for
+multiple malicious-client counts, but they do not include a full configuration
+or code-revision manifest. Confirm their provenance before using them to assess
+the current clustering pipeline; earlier results may use different preprocessing.
 
 ### 5.3 Direction score
 
@@ -381,7 +395,11 @@ When trust filtering is enabled:
 - training metrics are recomputed from the qualified clients' example counts;
 - if no client qualifies, the previous global model is retained.
 
-When trust filtering is disabled, all client models are equally averaged.
+When trust filtering is disabled, all client models are equally averaged. The
+runner skips delta calculations, all four defense checks, trust scoring, and
+selection. It still evaluates the global model each round, but exports only the
+global metrics workbook. Training metrics are example-weighted in both modes;
+model aggregation itself is an equal-client average.
 
 The resulting model becomes `W_t+1` and is broadcast at the beginning of the
 next round.
@@ -413,7 +431,22 @@ adding `_2`, `_3`, and so on when a target filename already exists.
 | `validation_*` | Validation loss and accuracy for every client |
 | `trust_scores_*` | Four binary component scores and final trust score |
 | `selected_clients_*` | Clients qualified in each round |
-| `hdbscan_*_plots/` | PCA/HDBSCAN visualization for each round |
+| `hdbscan_*_plots/hdbscan_plots/` | PCA/HDBSCAN PNG visualization for each round |
+
+Only `globalmodel_results_*` is written when `USE_TRUST_FILTERING=False`.
+For the current configuration, example filenames are:
+
+```text
+globalmodel_results_9_trust_is_true.xlsx
+trust_scores_clients_15_malicious_9_rounds_30_trust_is_true.xlsx
+selected_clients_15_malicious_9_rounds_30_trust_is_true.xlsx
+hdbscan_clients_15_malicious_9_rounds_30_trust_is_true_plots/
+└── hdbscan_plots/round0weights_hdbscan.png
+```
+
+Workbook round numbers start at `1`; internal round keys and plot filenames
+start at `round0weights`. The runner saves metrics and figures, but does not
+save model checkpoints or provide resume support.
 
 Files are updated after every completed round with all results accumulated so
 far. This provides partial results if a later round fails.
@@ -464,16 +497,18 @@ Current configuration snapshot:
 | Setting | Current value |
 | --- | ---: |
 | Clients | 15 |
-| Malicious clients | 0 (current clean baseline) |
+| Malicious clients | 9 (60% of all clients) |
 | Federated rounds | 30 |
 | Maximum samples | 10,000 |
 | Client test split | 0.12 |
 | Batch size | 8 |
 | Client learning rate | 0.01 |
+| Random seed | 42 |
 | Label-flip probability | 0.40 |
 | Backdoor poison probability | 0.40 |
 | HDBSCAN PCA components | 2 |
 | HDBSCAN minimum cluster size | 2 |
+| HDBSCAN minimum samples | 1 |
 | HDBSCAN cluster-selection epsilon | 0.20 |
 | HDBSCAN allows one cluster | Yes |
 | HDBSCAN noise-distance threshold | 1.50 |
@@ -483,16 +518,57 @@ Current configuration snapshot:
 | Trust threshold | 0.50 (inclusive) |
 | Trust filtering | Enabled |
 
-Although both attack implementations are enabled, `NUM_MALICIOUS=0` means the
-current configuration assigns no client an attack. Change `NUM_MALICIOUS` for an
-attacked experiment; `client_0` remains excluded from malicious assignment.
+The current attack list contains label flipping and backdoor poisoning, with a
+60%/40% assignment distribution. Set `NUM_MALICIOUS=0` for a clean baseline;
+`client_0` remains excluded from malicious assignment in attacked runs.
+
+For paired defense comparisons, repeat a configuration with
+`USE_TRUST_FILTERING=True` and `False`, holding data, attacks, and seed fixed.
+The runner reads constants directly and has no command-line parameter parser.
+
+Some configuration names are currently duplicated or not wired into the runner:
+
+- Trust scoring reads `TRUST_WEIGHT_CLUSTER`, `TRUST_WEIGHT_DIRECTION`,
+  `TRUST_WEIGHT_MAGNITUDE`, and `TRUST_WEIGHT_VALIDATION`. The separate
+  `CLUSTERING_WEIGHT`/`DIRECTION_WEIGHT`/`MAGNITUDE_WEIGHT`/`VALIDATION_WEIGHT`
+  fields copied into `ExperimentConfig` do not control the scoring function.
+- Attack selection uses `ATTACK_LIST` and `ATTACK_DISTRIBUTION`; the standalone
+  `LABEL_FLIP` and `BACKDOOR` booleans are not consulted by the runner.
+- The partitioning code passes a literal `0.7` fake-client cap, and the runner
+  uses literal `client_0` references. Editing `MAX_FAKE_RATIO` or `HEAD_CLIENT`
+  alone does not change those behaviors.
+- The runner saves results each round regardless of `STORE_RESULTS`.
+
+Despite the nearby code comment saying three checks are required,
+`TRUST_THRESHOLD=0.50` accepts **two** of the four equally weighted checks.
 
 Always record the configuration used for a dissertation experiment because the
 filenames include only some settings, not every threshold and attack parameter.
 
 ## 11. Running the experiment
 
-From the repository root, activate the project environment and run:
+From the repository root, activate the project's TensorFlow/TFF environment.
+The dependency file is named `requirments.txt` (the spelling is intentional in
+the command below). It is unpinned, and the code also directly imports
+scikit-learn, which is not explicitly listed there:
+
+```bash
+python -m pip install -r requirments.txt scikit-learn
+```
+
+This is a dependency installation starting point, not a verified environment
+lock. Use a compatible Python/TensorFlow/TFF combination and record the versions
+from the environment used for experiments.
+
+Before running:
+
+1. Place the two class folders under `data/Kidney Cancer/` as shown above.
+2. Edit `DATA_DIR` and `RESULTS_DIR` in `src/config/constants.py`; both currently
+   contain absolute paths specific to the author's machine.
+3. Set the client count, malicious count, rounds, and filtering mode in that
+   same file. The default configuration launches the 30-round attacked run.
+
+Then run:
 
 ```bash
 python -m src.experiments.run_tff
@@ -500,8 +576,10 @@ python -m src.experiments.run_tff
 
 The runner prints the malicious-client mapping, per-round defense results,
 trust decisions, selected clients, training/global metrics, saved output paths,
-and a final selection summary. A cleanup step terminates remaining TFF worker
-processes and clears the TensorFlow/Keras session when the run exits.
+and a final selection summary when filtering is enabled. On exit, cleanup
+clears the TensorFlow/Keras session and uses Linux `pkill` to terminate matching
+TFF worker processes owned by the current user. This can also affect another TFF
+experiment running under the same account.
 
 ## 12. Key implementation files
 
@@ -560,3 +638,11 @@ The current defense behavior includes these corrections:
   a threshold above `0.50` would require at least three checks.
 - Cluster labels are recalculated independently in every round. Cluster `0` in
   one round is not necessarily related to cluster `0` in another round.
+- The runner reports clean classification loss and accuracy, but does not yet
+  calculate backdoor attack success rate or call the detection-metrics helper.
+- Splits are randomized at the image level, without patient/group identifiers
+  or explicit class stratification. Patient-independent evaluation and
+  controlled non-IID client partitions are not implemented in this runner.
+- Seeding does not fully specify the dataset ordering: filenames are collected
+  with unsorted `os.listdir()` before shuffling. Record the data inventory and
+  environment when comparing experiments across machines.
