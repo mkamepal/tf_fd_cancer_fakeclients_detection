@@ -1,7 +1,8 @@
 import os
 
 import hdbscan
-import matplotlib.pyplot as plt
+from matplotlib.backends.backend_agg import FigureCanvasAgg
+from matplotlib.figure import Figure
 import numpy as np
 import src.config.constants as constants
 
@@ -207,7 +208,16 @@ def plot_hdbscan_round(
     # Create graph
     # --------------------------------------------------------
 
-    plt.figure(figsize=(10, 7))
+    if show_plot:
+        import matplotlib.pyplot as plt
+
+        fig, ax = plt.subplots(figsize=(10, 7))
+    else:
+        # File-only plots must never create GUI objects: TensorFlow workers
+        # can trigger garbage collection outside the Tk main thread.
+        fig = Figure(figsize=(10, 7))
+        FigureCanvasAgg(fig)
+        ax = fig.subplots()
 
     unique_labels = sorted(set(labels))
 
@@ -222,7 +232,7 @@ def plot_hdbscan_round(
         if cluster_label == -1:
 
             # Noise / outlier clients
-            plt.scatter(
+            ax.scatter(
                 x[indices],
                 y[indices],
                 marker="x",
@@ -234,7 +244,7 @@ def plot_hdbscan_round(
         else:
             # Larger marker means higher HDBSCAN confidence
             point_sizes = 120 + 300 * probabilities[indices]
-            plt.scatter(
+            ax.scatter(
                 x[indices],
                 y[indices],
                 s=point_sizes,
@@ -243,7 +253,7 @@ def plot_hdbscan_round(
             )
 
     for idx, client_id in enumerate(client_keys):
-        plt.annotate(
+        ax.annotate(
             client_id,
             (x[idx], y[idx]),
             xytext=(6, 6),
@@ -255,24 +265,22 @@ def plot_hdbscan_round(
 
     number_of_noise = int(np.sum(labels == -1))
 
-    plt.title(
+    ax.set_title(
         f"{round_key} - HDBSCAN Clustering\n"
         f"Clusters: {number_of_clusters} | "
         f"Noise: {number_of_noise}"
     )
-    plt.xlabel("PCA Component 1")
-    plt.ylabel("PCA Component 2")
-    plt.grid(alpha=0.3)
-    plt.legend()
-    plt.tight_layout()
+    ax.set_xlabel("PCA Component 1")
+    ax.set_ylabel("PCA Component 2")
+    ax.grid(alpha=0.3)
+    ax.legend()
+    fig.tight_layout()
 
     file_path = os.path.join(output_dir, f"{round_key}_hdbscan.png")
-    plt.savefig(file_path, dpi=300, bbox_inches="tight")
+    fig.savefig(file_path, dpi=300, bbox_inches="tight")
 
     if show_plot:
         plt.show()
-    else:
-        plt.close()
 
     return file_path
 

@@ -2,7 +2,7 @@ import collections
 import tensorflow as tf
 import tensorflow_federated as tff
 
-from src.models.cnn import create_keras_model
+from src.models.model_factory import create_keras_model
 
 
 def build_tff_model(input_spec):

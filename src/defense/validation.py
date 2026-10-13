@@ -1,6 +1,6 @@
 import tensorflow as tf
 
-from src.models.cnn import create_keras_model
+from src.models.model_factory import create_keras_model
 
 
 def calculate_validation_results(

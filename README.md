@@ -1,4 +1,4 @@
-# Federated Kidney Cancer Classification and Malicious-Client Detection
+# Federated Image Classification and Malicious-Client Detection
 
 This document explains how data moves through the federated-learning experiment,
 how malicious clients are created, how clients are scored, and which output files
@@ -24,17 +24,87 @@ and full run configurations also need to be recorded for reproducibility.
 
 ## Project objective
 
-The project trains a binary kidney-cancer image classifier with TensorFlow
-Federated (TFF). During training, a configurable subset of clients is made
+The project trains dataset-specific CNN classifiers with TensorFlow
+Federated (TFF) for kidney cancer, MNIST, EMNIST, and CIFAR-10. During training, a configurable subset of clients is made
 malicious through label-flipping or backdoor poisoning. Four defense checks are
 combined into a trust score so that only qualified clients contribute to the
 next global model.
+
+## Selecting a dataset
+
+Set exactly one switch to `True` in `src/config/constants.py`. For example,
+to run MNIST (the current selection):
+
+```python
+DATASET_CANCER = False
+DATASET_MNIST = True
+DATASET_EMNIST = False
+DATASET_CIFAR10 = False
+```
+
+MNIST is selected first; EMNIST remains available for later experiments.
+Zero or multiple enabled datasets raise a
+configuration error. Restart the experiment after editing the switches.
+
+| Dataset | Input shape | Classes | Model |
+| --- | --- | ---: | --- |
+| Kidney cancer | 64 × 64 × 3 | 2 | `src/models/cancer_cnn.py` |
+| MNIST | 28 × 28 × 1 | 10 | `src/models/mnist_cnn.py` |
+| EMNIST Balanced | 28 × 28 × 1 | 47 | `src/models/emnist_cnn.py` |
+| CIFAR-10 | 32 × 32 × 3 | 10 | `src/models/cifar10_cnn.py` |
+
+The shared `src/models/model_factory.py` selects the same architecture for local
+training, trusted validation, and global evaluation. The benchmark models have
+softmax outputs and use the existing sparse-label loss and TFF training loop.
+
+### MNIST files and download
+
+MNIST does not use TensorFlow Datasets or split metadata. The loader checks
+`MNIST_DATA_DIR` (default `data/mnist/`) for existing digit-image folders, an
+NPZ file, or a ZIP. If none exists, it downloads the checksum-verified
+[Keras MNIST archive](https://www.tensorflow.org/api_docs/python/tf/keras/datasets/mnist/load_data)
+as `data/mnist/mnist.npz` and reads the arrays directly.
+
+Set `MNIST_SOURCE` to select a particular source instead of automatic discovery:
+
+- Image directory: images inside folders `0/` through `9/`, optionally under
+  directories such as `train/` and `test/`. PNG, JPEG, and BMP are supported;
+  images are converted to grayscale and resized to 28 × 28.
+- NPZ: `images`/`labels`, or the standard
+  `x_train`/`y_train`/`x_test`/`y_test` arrays, with pixel values from 0 to 255.
+- ZIP: contains either of the above. Members are validated, extracted into a
+  temporary directory, loaded, and the temporary files are removed. The original
+  ZIP is kept for reuse. Raw IDX/GZIP files are not supported by this loader.
+
+All supplied source splits are combined into one pool. The framework then uses
+the same allocation pipeline as cancer: seeded global shuffle, `MAX_SAMPLES`
+limit, the configured IID techniques, and each client's own `TEST_SPLIT`.
+Only training data is poisoned; client holdouts stay clean. Pixels are scaled
+to `[0, 1]`, and MNIST results go to `src/results/mnist/`.
+
+[EMNIST Balanced](https://www.tensorflow.org/datasets/catalog/emnist) and
+[CIFAR-10](https://www.tensorflow.org/datasets/catalog/cifar10) load through
+TensorFlow Datasets and download on first use into `data/tfds/`. Benchmark
+pixels are normalized to `[0, 1]`; EMNIST's spatial axes are transposed to make
+characters upright. No cancer image resizing is applied to these benchmarks.
+
+For consistency with the existing simulation, pooled benchmark examples
+are shuffled, capped by `MAX_SAMPLES`, and partitioned across simulated clients.
+`TEST_SPLIT` creates each client's clean holdout before training-only poisoning.
+Original train/test arrays are pooled before repartitioning; reported global accuracy is still
+on `client_0`'s holdout, not official benchmark test accuracy. This is an
+image-level simulated partition, not EMNIST's natural writer-based federation.
+
+New results go into an `iid_<enabled techniques>/` subfolder under the selected
+dataset directory, such as `src/results/cancer/iid_random/` or
+`src/results/mnist/iid_stratified_balanced_unequal/`. Older results are preserved.
+Existing defense thresholds carry over unchanged and need evaluation per dataset.
 
 ## End-to-end flow
 
 ```mermaid
 flowchart TD
-    A[Kidney image folders] --> B[Discover classes and assign numeric labels]
+    A[Selected dataset: cancer / MNIST / EMNIST / CIFAR-10] --> B[Load images and integer labels]
     B --> C[Seeded global shuffle and sample limit]
     C --> D[Partition images across federated clients]
     D --> E[Per-client train/test split]
@@ -66,7 +136,7 @@ flowchart TD
     V --> G
 ```
 
-## 1. Input dataset
+## 1. Kidney cancer input dataset
 
 The configured dataset directory is:
 
@@ -93,20 +163,19 @@ Current local inventory:
 | `kidney_tumor` | 5,000 |
 | **Total** | **10,000** |
 
-The model has a two-unit softmax output, so the current implementation expects
-exactly two classes.
+The cancer model has a two-unit softmax output and expects exactly two classes.
+Benchmark models use their own input shapes and output class counts above.
 
 ## 2. Loading and preprocessing
 
-`prepare_client_dataset()` in `src/data_ops/client_partition.py` performs the
-following operations:
+`prepare_client_dataset()` in `src/data_ops/client_partition.py` dispatches to
+the selected loader. For kidney cancer it performs the following operations:
 
 1. Finds all class directories and image paths.
 2. Assigns labels from the sorted class-directory names.
 3. Shuffles the combined image/label list using the configured seed.
 4. Limits the run to `MAX_SAMPLES` when a limit is configured.
-5. Divides the shuffled records into approximately equal contiguous partitions,
-   one for each client.
+5. Allocates records to clients using the enabled IID switches below.
 6. Loads each image as RGB, resizes it first to `224 x 224` and then to the
    model input size of `64 x 64`.
 7. Converts pixels to `float32` and scales them to the range `[0, 1]`.
@@ -117,6 +186,127 @@ following operations:
 
 The clean test split is never poisoned. The current test fraction and batch size
 come from `src/config/constants.py`.
+
+### IID switches
+
+Set these booleans in `src/config/constants.py`; multiple enabled switches
+compose into **one experiment**, for cancer, MNIST, EMNIST, and CIFAR-10:
+
+```python
+IID_RANDOM = True
+IID_STRATIFIED = False
+IID_BALANCED = False
+IID_UNEQUAL = False
+IID_UNEQUAL_ALPHA = 1.0
+```
+
+#### 1. Random allocation: `IID_RANDOM`
+
+Shuffles samples from the common pool and distributes them randomly among
+clients. Unless unequal sizing is enabled, client sizes differ by at most one
+sample. For example, 1,000 images across 10 clients gives 100 images per client.
+If the pool is 60% cancer and 40% normal, a client might receive 63 cancer and
+37 normal images rather than exactly 60 and 40.
+
+Use this as a simple approximate IID baseline. Class proportions vary by chance,
+particularly for small clients; IID does not require identical observed counts.
+
+#### 2. Stratified allocation: `IID_STRATIFIED`
+
+Allocates each class proportionally to each client's sample count. For a pool
+containing 60% cancer and 40% normal images, a client with 100 samples receives
+approximately 60 cancer and 40 normal images. Integer rounding applies when
+exact proportions are impossible.
+
+Use this for a controlled baseline that reduces accidental class differences
+between clients. It preserves the pool's existing proportions, including any
+class imbalance. If random and stratified are both enabled, stratification
+controls class allocation; samples are still randomly shuffled within classes
+and clients.
+
+#### 3. Balanced classes: `IID_BALANCED`
+
+Undersamples every class to the smallest class count after `MAX_SAMPLES` is
+applied. A pool with 800 cancer and 200 normal images becomes 200 cancer and
+200 normal images. The other 600 cancer images are excluded from that run;
+source files are not deleted.
+
+Use this to give all classes equal representation in the common pool.
+**Stratification preserves the existing class ratio; balancing changes it to
+an equal ratio.** Balancing can substantially reduce the training data available.
+
+Alone, balanced mode uses stratified allocation to spread classes approximately
+evenly across clients. With random mode, it randomly allocates the balanced pool.
+With stratified mode, it preserves approximately balanced proportions per client.
+
+#### 4. Unequal client sizes: `IID_UNEQUAL`
+
+Assigns different numbers of samples to clients drawn from the same common pool.
+For example, three clients might receive 50, 90, and 160 images instead of 100
+each. These counts are illustrative; the actual allocation depends on `SEED`.
+
+Use this to study how different amounts of local data affect training and
+fake-client detection. Client sizes use Dirichlet proportions and multinomial
+counts, with at least two samples reserved per client. This changes sample
+counts rather than deliberately creating different label distributions.
+
+`IID_UNEQUAL_ALPHA` must be finite and positive:
+
+| Value | Typical effect |
+| --- | --- |
+| `0.3` | Greater differences between client sizes |
+| `1.0` | Default size variation |
+| `10.0` | More similar client sizes |
+
+These are tendencies, not guaranteed size ratios. Very small pools may leave
+little room for variation. With stratification enabled, class counts follow each
+client's capacity; otherwise, random sampling can cause substantial class-ratio
+variation in small clients. Model aggregation remains equally weighted by client;
+this switch only changes data allocation.
+
+#### Combining switches
+
+Multiple `True` values compose into **one partition and one experiment**; they
+do not launch separate runs. The stages are:
+
+1. Balance the common pool if `IID_BALANCED` is enabled.
+2. Choose unequal client capacities if `IID_UNEQUAL` is enabled; otherwise use
+   approximately equal capacities.
+3. Allocate samples using stratification if `IID_STRATIFIED` is enabled.
+   Balanced mode also uses stratification when `IID_RANDOM` is disabled.
+   Otherwise, allocate randomly from the pool.
+
+| Enabled switches (all others `False`) | Result |
+| --- | --- |
+| `IID_RANDOM` | Equal-size clients, random class proportions |
+| `IID_STRATIFIED` | Equal-size clients, proportions matching the pool |
+| `IID_BALANCED` | Equal-size clients, approximately balanced classes |
+| `IID_UNEQUAL` | Unequal-size clients, random samples from the pool |
+| `IID_RANDOM`, `IID_BALANCED` | Equal-size clients, random samples from a balanced pool |
+| `IID_STRATIFIED`, `IID_UNEQUAL` | Unequal-size clients, proportions matching the pool |
+| `IID_STRATIFIED`, `IID_BALANCED`, `IID_UNEQUAL` | Unequal-size clients, approximately balanced classes |
+| All four | Same allocation as the preceding row; stratification takes precedence |
+
+For example, enable all four with:
+
+```python
+IID_RANDOM = True
+IID_STRATIFIED = True
+IID_BALANCED = True
+IID_UNEQUAL = True
+IID_UNEQUAL_ALPHA = 1.0
+```
+
+At least one switch must be enabled, and each must be `True` or `False`.
+Insufficient data to give every client two samples, including after balancing,
+raises an error. Client allocations are disjoint and reproducible with `SEED`.
+The two-sample minimum supports a train/test split; it does not guarantee every
+class will appear in every client's training and test subsets.
+
+The runner prints the selected switches and stores results under
+`RESULTS_DIR/iid_<enabled techniques>/`. Train/test splits remain random within
+clients, so their individual class proportions can vary. Attacks apply afterward
+to training data only; IID describes the allocation before poisoning.
 
 ## 3. Malicious-client assignment
 
@@ -152,7 +342,7 @@ For the selected fraction of training samples:
 
 ## 4. Model and local federated training
 
-The CNN in `src/models/cnn.py` contains three convolution/max-pooling blocks,
+The cancer CNN in `src/models/cancer_cnn.py` contains three convolution/max-pooling blocks,
 a 128-unit dense layer, and a two-class softmax output.
 
 At the start of every round, the server broadcasts the current global weights
@@ -419,7 +609,7 @@ the main experiment runner does not currently call this function.
 
 ## 9. Output files
 
-Results are written to `src/results/`. Existing experiments are preserved by
+Results are written to `src/results/<dataset>/`. Existing experiments are preserved by
 adding `_2`, `_3`, and so on when a target filename already exists.
 
 | Output prefix | Contents |
@@ -534,9 +724,9 @@ Some configuration names are currently duplicated or not wired into the runner:
   fields copied into `ExperimentConfig` do not control the scoring function.
 - Attack selection uses `ATTACK_LIST` and `ATTACK_DISTRIBUTION`; the standalone
   `LABEL_FLIP` and `BACKDOOR` booleans are not consulted by the runner.
-- The partitioning code passes a literal `0.7` fake-client cap, and the runner
+- The cancer partitioning code passes a literal `0.7` fake-client cap, and the runner
   uses literal `client_0` references. Editing `MAX_FAKE_RATIO` or `HEAD_CLIENT`
-  alone does not change those behaviors.
+  alone does not change those behaviors. Benchmark partitioning reads `MAX_FAKE_RATIO`.
 - The runner saves results each round regardless of `STORE_RESULTS`.
 
 Despite the nearby code comment saying three checks are required,
@@ -547,26 +737,76 @@ filenames include only some settings, not every threshold and attack parameter.
 
 ## 11. Running the experiment
 
-From the repository root, activate the project's TensorFlow/TFF environment.
-The dependency file is named `requirments.txt` (the spelling is intentional in
-the command below). It is unpinned, and the code also directly imports
-scikit-learn, which is not explicitly listed there:
+From the repository root, create and activate a dedicated environment. With
+Conda installed:
 
 ```bash
-python -m pip install -r requirments.txt scikit-learn
+conda create -n cancer-federated python=3.9 pip
+conda activate cancer-federated
 ```
 
-This is a dependency installation starting point, not a verified environment
-lock. Use a compatible Python/TensorFlow/TFF combination and record the versions
-from the environment used for experiments.
+The dependency file is named `requirments.txt` (the spelling is intentional in
+the command below). It pins the runtime, analysis, and notebook-kernel dependencies
+for Python 3.9 on Linux x86_64 (glibc 2.31 or newer), based on the local environment
+and TensorFlow Federated's compatibility constraints:
+
+```bash
+python -m pip install -r requirments.txt
+python -m pip check
+```
+
+The file includes the official JAX wheel archive for TFF's older JAX dependency.
+Use a fresh environment for installation. These pins are not a complete transitive
+dependency lock or a verified clean installation; record the installed versions
+from the environment used for experiments. A notebook frontend (such as an IDE
+with notebook support) and any GPU drivers/CUDA libraries are installed separately.
+
+The dependency groups are:
+
+| Purpose | Packages |
+| --- | --- |
+| Federated training | TensorFlow 2.14.1, TensorFlow Federated 0.87.0, Keras 2.14.0, JAX/JAXlib 0.4.14 |
+| Numerical analysis and clustering | NumPy, SciPy, scikit-learn, HDBSCAN |
+| Datasets and images | TensorFlow Datasets, TensorFlow Metadata, protobuf, Pillow |
+| Plots and Excel exports | Matplotlib, openpyxl |
+| Configuration import | SQLAlchemy |
+| Notebook kernel | ipykernel, IPython |
+| TFF typing compatibility | typing-extensions 4.5.0 |
+
+Keep the pinned versions together. In particular, TFF requires
+`typing-extensions==4.5.0`; upgrading it independently can introduce a dependency
+conflict. `torchattacks` is not needed because the implemented attacks use
+TensorFlow and NumPy. The test suite uses Python's built-in `unittest`.
+
+After installation, check the main imports and run the offline tests before
+starting a full experiment:
+
+```bash
+python -c "import tensorflow as tf; import tensorflow_federated as tff; import tensorflow_datasets; import hdbscan; from src.config import constants; print('TensorFlow:', tf.__version__, 'TFF:', tff.__version__)"
+python -m unittest discover -s tests -v
+```
+
+The tests cover dataset preparation, model training on small synthetic batches,
+TFF computation construction, and IID partitioning. They do not replace a full
+experiment with the selected data and hardware.
 
 Before running:
 
-1. Place the two class folders under `data/Kidney Cancer/` as shown above.
-2. Edit `DATA_DIR` and `RESULTS_DIR` in `src/config/constants.py`; both currently
-   contain absolute paths specific to the author's machine.
+1. Select one dataset using the switches above. For cancer, place the two class
+   folders under `data/Kidney Cancer/`; benchmarks download on first use.
+2. For cancer, edit `DATA_DIR` in `src/config/constants.py` to match your local
+   path. `RESULTS_DIR` and `DATASET_CACHE_DIR` are derived from the repository path.
 3. Set the client count, malicious count, rounds, and filtering mode in that
    same file. The default configuration launches the 30-round attacked run.
+4. Set `BATCH_SIZE` in `src/config/constants.py` (currently `8`). The dataset
+   preparation code applies it to both training and test batches.
+
+Once installation and checks pass, save the resolved package versions alongside
+your experiment configuration for reproducibility:
+
+```bash
+python -m pip freeze > experiment-environment.txt
+```
 
 Then run:
 
@@ -588,7 +828,14 @@ experiment running under the same account.
 | `src/config/constants.py` | Experiment and defense configuration |
 | `src/data_ops/client_partition.py` | Image loading, preprocessing, partitioning, splits |
 | `src/data_ops/attacks.py` | Malicious-client assignment and attacks |
-| `src/models/cnn.py` | CNN architecture |
+| `src/models/cancer_cnn.py` | Binary kidney cancer CNN |
+| `src/models/emnist_cnn.py` | EMNIST Balanced CNN |
+| `src/models/mnist_cnn.py` | MNIST digit CNN |
+| `src/data_ops/mnist_data.py` | MNIST local files, ZIP extraction, and download |
+| `src/models/cifar10_cnn.py` | CIFAR-10 CNN |
+| `src/models/model_factory.py` | Shared dataset-driven model selection |
+| `src/data_ops/benchmark_data.py` | Benchmark download, normalization, and client partitioning |
+| `src/data_ops/iid_partition.py` | Shared IID allocation and composition of the four switches |
 | `src/federated/tff_process.py` | TFF initialization and local client training |
 | `src/defense/weight_utils.py` | Flattening and client-delta construction |
 | `src/defense/clustering.py` | PCA and HDBSCAN defense |
