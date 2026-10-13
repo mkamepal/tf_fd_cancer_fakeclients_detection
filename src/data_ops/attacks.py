@@ -9,19 +9,20 @@ def label_flip_attack(labels, flip_prob, seed=42):
     rng = np.random.RandomState(seed)
     n = len(labels)
 
-    num_classes = len(np.unique(labels))
+    classes = np.unique(labels)
+    num_classes = len(classes)
     if n == 0 or num_classes < 2:
         return labels
 
     mask = rng.rand(n) < float(flip_prob)
 
     if mask.sum() > 0:
-        rand_targets = rng.randint(0, num_classes, size=n)
-        same = (rand_targets == labels)
-
-        rand_targets[same] = (rand_targets[same] + 1) % num_classes
-
-        labels[mask] = rand_targets[mask]
+        # Local multiclass partitions may contain non-contiguous labels.
+        # Choose a different observed class without inventing class IDs.
+        source_indices = np.searchsorted(classes, labels)
+        offsets = rng.randint(1, num_classes, size=n)
+        targets = classes[(source_indices + offsets) % num_classes]
+        labels[mask] = targets[mask]
 
     return labels
 

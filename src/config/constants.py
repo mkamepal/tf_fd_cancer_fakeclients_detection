@@ -1,4 +1,36 @@
 # config/constants.py
+from pathlib import Path
+
+from sqlalchemy import false
+
+# Exactly one dataset must be True.
+DATASET_CANCER = True
+DATASET_MNIST = False
+DATASET_EMNIST = False
+DATASET_CIFAR10 = False
+
+
+def get_dataset_name():
+    flags = {
+        "cancer": DATASET_CANCER,
+        "mnist": DATASET_MNIST,
+        "emnist": DATASET_EMNIST,
+        "cifar10": DATASET_CIFAR10,
+    }
+    if any(type(value) is not bool for value in flags.values()):
+        raise ValueError("Dataset switches must be True or False.")
+    selected = [name for name, enabled in flags.items() if enabled]
+    if len(selected) != 1:
+        raise ValueError("Set exactly one dataset switch to True (CANCER, MNIST, EMNIST, CIFAR10).")
+    return selected[0]
+
+
+DATASET_NAME = get_dataset_name()
+DATASET_CACHE_DIR = str(Path(__file__).resolve().parents[2] / "data" / "tfds")
+MNIST_DATA_DIR = str(Path(__file__).resolve().parents[2] / "data" / "mnist")
+# None: discover local class folders, mnist.npz, or ZIP; download if absent.
+# Otherwise set a path to a class-folder directory, .npz file, or .zip archive.
+MNIST_SOURCE = None
 
 
 # ============================================================
@@ -16,7 +48,7 @@ STORE_RESULTS = True
 
 ## Malicious client configurations
 
-NUM_MALICIOUS = 9
+NUM_MALICIOUS = 3
 
 MAX_FAKE_RATIO = 0.7
 
@@ -52,6 +84,35 @@ TEST_SPLIT = 0.12
 BATCH_SIZE = 8
 MAX_SAMPLES = 10000
 
+# IID partitioning: enable one or more compatible stages for a single run.
+# Order: balance classes -> choose client sizes -> allocate samples.
+# STRATIFIED takes precedence over RANDOM for class allocation; both shuffle.
+# BALANCED alone uses stratified allocation to spread classes evenly.
+IID_RANDOM = False
+IID_STRATIFIED = False
+IID_BALANCED = True
+IID_UNEQUAL = False
+
+# Unequal IID: positive Dirichlet concentration for client sample counts.
+# Smaller values usually produce greater size differences. Labels are still
+# sampled randomly from the same pool. Reserve two samples for every client.
+IID_UNEQUAL_ALPHA = 1.0
+
+
+def get_iid_techniques():
+    flags = {
+        "random": IID_RANDOM,
+        "stratified": IID_STRATIFIED,
+        "balanced": IID_BALANCED,
+        "unequal": IID_UNEQUAL,
+    }
+    if any(type(value) is not bool for value in flags.values()):
+        raise ValueError("IID switches must be True or False.")
+    selected = [name for name, enabled in flags.items() if enabled]
+    if not selected:
+        raise ValueError("Enable at least one IID technique in constants.py.")
+    return selected
+
 ## Machine Learning Parameters
 CLIENT_LEARNING_RATE = 0.01
 
@@ -70,7 +131,7 @@ TRUST_THRESHOLD = 0.50
 DATA_DIR = '/home/mahesh/Desktop/Dissertation/tf_fd_cancer_fakeclients_detection/data/Kidney Cancer'
 
 ## results dir
-RESULTS_DIR = "/home/mahesh/Desktop/Dissertation/tf_fd_cancer_fakeclients_detection/src/results"
+RESULTS_DIR = str(Path(__file__).resolve().parents[1] / "results" / DATASET_NAME)
 
 
 TRUST_WEIGHT_CLUSTER = 0.25

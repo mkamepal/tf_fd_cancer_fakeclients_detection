@@ -4,6 +4,7 @@ import random
 
 import numpy as np
 import tensorflow as tf
+import tensorflow_federated as tff
 import tensorflow.keras.backend as K
 import subprocess
 from openpyxl import Workbook
@@ -215,7 +216,8 @@ def save_experiment_results_to_excel(
     file_paths=None,
 ):
     """Save global metrics and, when filtering is enabled, defense results."""
-    output_dir = constants.RESULTS_DIR
+    iid_name = "iid_" + "_".join(constants.get_iid_techniques())
+    output_dir = os.path.join(constants.RESULTS_DIR, iid_name)
     os.makedirs(output_dir, exist_ok=True)
     if file_paths is None:
         trust_status = str(constants.USE_TRUST_FILTERING).lower()
@@ -423,6 +425,8 @@ def main():
     K.clear_session()
     gc.collect()
     config = get_config()
+    print("\nIID techniques:", ", ".join(constants.get_iid_techniques()))
+    print("\nDataset:", constants.get_dataset_name())
     set_seeds(config.seed)
     print("\nTrust filtering enabled:", constants.USE_TRUST_FILTERING)
     attack_params = {
@@ -686,6 +690,12 @@ def main():
 
 
 if __name__ == "__main__":
+    K.clear_session()
+    gc.collect()
+
+    tff.backends.native.set_sync_local_cpp_execution_context(
+        max_concurrent_computation_calls=4
+    )
     try:
         main()
     finally:
